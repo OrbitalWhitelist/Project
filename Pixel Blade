@@ -1,0 +1,1544 @@
+local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+WindUI:SetTheme("Crimson")
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+local Lighting = game:GetService("Lighting")
+local LocalPlayer = Players.LocalPlayer
+
+getgenv().AuraStyle = "Fast"
+getgenv().AutoDungeon = false
+getgenv().KillAuraEnabled = false
+getgenv().KillAuraMagnitude = 15
+getgenv().DebugPanelEnabled = false
+getgenv().WalkSpeedEnabled = false
+getgenv().WalkSpeedValue = 16
+getgenv().JumpPowerEnabled = false
+getgenv().JumpPowerValue = 50
+getgenv().EspEnabled = false
+getgenv().EspBox = true
+getgenv().EspName = true
+getgenv().EspHealth = true
+getgenv().AntiLagConnection = nil
+getgenv().SelectedTeleportPlayer = ""
+getgenv().IsTriggeringBoss = false
+getgenv().UserAuraMagnitude = 15
+getgenv().SelectedChest = ""
+getgenv().ChestList = {}
+getgenv().AutoChestEnabled = false
+
+local CurrentSafeDistance = 20
+local BOSS_SAFE_DISTANCE = 30
+local NORMAL_SAFE_DISTANCE = 20
+local ORBIT_RADIUS = 15
+local ESPObjects = {}
+local AuraSphere = nil
+local OrbitAngle = 0
+local LastEnemyTime = os.clock()
+local TeleportedToExit = false
+local BossDetectedThisWave = false
+local AuraEntryTimes = {}
+local BookHandSeenTimes = {}
+local CurrentTween = nil
+local CutsceneWaitUntil = 0
+local KorthArrivalTime = 0
+local KorthWaiting = false
+local CurrentBossMode = false
+local KillAuraThread = nil
+local TriggeredKorthSpawn = false
+local KorthTriggerTime = 0
+local TweenToPrisoner = false
+local PrisonerTweenComplete = false
+local StartDoorTweenComplete = false
+
+local CurrentFPS = 60
+local FrameCount = 0
+local LastFpsTime = os.clock()
+local CurrentStageText = "1/3"
+
+local BossList = {
+    "akuma", "atticus", "gatekeeper", "giantgoblin", "infestedbeast", 
+    "kingslayer", "kori", "localkori", "localkorth", "corruptkorth", 
+    "lumberjack", "maneater", "nekros", "shimbombo"
+}
+
+local NameDict = {
+    ["localkorth"] = "Local Korth",
+    ["corruptkorth"] = "Corrupt Korth",
+    ["localkori"] = "Local Kori",
+    ["kori"] = "Kori",
+    ["akuma"] = "Akuma",
+    ["atticus"] = "Atticus",
+    ["gatekeeper"] = "Gatekeeper",
+    ["giantgoblin"] = "Giant Goblin",
+    ["infestedbeast"] = "Infested Beast",
+    ["kingslayer"] = "King Slayer",
+    ["lumberjack"] = "Lumberjack",
+    ["maneater"] = "Man Eater",
+    ["nekros"] = "Nekros",
+    ["shimbombo"] = "Shimbombo",
+    ["eldersorcerer"] = "Elder Sorcerer",
+    ["bookhand"] = "Book Hand",
+    ["corruptfleshgiant"] = "Corrupt Flesh Giant",
+    ["splitleft"] = "Split Left",
+    ["splitright"] = "Split Right"
+}
+
+local Remote = ReplicatedStorage:FindFirstChild("remotes")
+local OnHitRemote = Remote and Remote:FindFirstChild("onHit")
+if not OnHitRemote then
+    warn("Sawit Hub: Remote Error.")
+end
+
+local function FormatChestName(Name)
+    local baseName, tier = Name:match("^(.-)(%d+)$")
+    if not baseName then
+        baseName = Name
+        tier = nil
+    end
+    local Formatted = baseName:gsub("(%l)(%u)", "%1 %2"):gsub("(%u)(%u%l)", "%1 %2"):gsub("^%l", string.upper)
+    if tier then
+        return Formatted .. " [Tier " .. tier .. "]"
+    end
+    return Formatted
+end
+
+local function FormatEnemyName(Name)
+    local lowerName = string.lower(Name)
+    lowerName = lowerName:gsub("%d+$", ""):match("^%s*(.-)%s*$")
+    for key, val in pairs(NameDict) do
+        if string.find(lowerName, key) then
+            return val
+        end
+    end
+    return Name:gsub("%d+$", ""):gsub("(%l)(%u)", "%1 %2"):gsub("^%l", string.upper)
+end
+
+local function RefreshChestList()
+    local LootFolder = LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("gameUI") and LocalPlayer.PlayerGui.gameUI:FindFirstChild("armory") and LocalPlayer.PlayerGui.gameUI.armory:FindFirstChild("inventory") and LocalPlayer.PlayerGui.gameUI.armory.inventory:FindFirstChild("clip") and LocalPlayer.PlayerGui.gameUI.armory.inventory.clip:FindFirstChild("Loot")
+    if LootFolder then
+        local NewList = {}
+        for _, Child in ipairs(LootFolder:GetChildren()) do
+            if string.find(Child.Name, "Chest") then
+                local DisplayName = FormatChestName(Child.Name)
+                table.insert(NewList, {Name = Child.Name, Display = DisplayName})
+            end
+        end
+        getgenv().ChestList = NewList
+        return NewList
+    end
+    return {}
+end
+
+local function RefreshChestDropdown(Dropdown)
+    local Chests = RefreshChestList()
+    local DisplayNames = {}
+    local Seen = {}
+    for _, Chest in ipairs(Chests) do
+        local dName = Chest.Display
+        if Seen[dName] then
+            Seen[dName] = Seen[dName] + 1
+            dName = dName .. " (" .. Seen[dName] .. ")"
+        else
+            Seen[dName] = 1
+        end
+        Chest.Display = dName
+        table.insert(DisplayNames, dName)
+    end
+    if #DisplayNames == 0 then
+        table.insert(DisplayNames, "No Chests")
+    end
+    if Dropdown.Refresh then
+        Dropdown:Refresh(DisplayNames)
+    elseif Dropdown.SetValues then
+        Dropdown:SetValues(DisplayNames)
+    end
+end
+
+local function OpenSelectedChest()
+    if not getgenv().AutoChestEnabled then return end
+    if game.PlaceId ~= 18172550962 then
+        return
+    end
+    if getgenv().SelectedChest and getgenv().SelectedChest ~= "" then
+        local Event = ReplicatedStorage.remotes.openLoot
+        if Event then
+            Event:InvokeServer(getgenv().SelectedChest, 1)
+        end
+    end
+end
+
+local function AutoChestLoop()
+    while true do
+        task.wait(0.5)
+        if getgenv().AutoChestEnabled then
+            pcall(function()
+                OpenSelectedChest()
+            end)
+        end
+    end
+end
+
+local DebugGui = Instance.new("ScreenGui")
+DebugGui.Name = "Debugging Panel"
+DebugGui.ResetOnSpawn = false
+DebugGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+DebugGui.Enabled = false
+
+local GuiSuccess, GuiErr = pcall(function()
+    DebugGui.Parent = gethui and gethui() or CoreGui
+end)
+if not GuiSuccess then
+    DebugGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local DebugFrame = Instance.new("Frame")
+DebugFrame.Name = "MainFrame"
+DebugFrame.Parent = DebugGui
+DebugFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+DebugFrame.Position = UDim2.new(0.5, -150, 0, 50)
+DebugFrame.Size = UDim2.new(0, 300, 0, 120)
+DebugFrame.BorderSizePixel = 0
+DebugFrame.Active = true
+DebugFrame.Draggable = true
+
+local UICorner = Instance.new("UICorner")
+UICorner.CornerRadius = UDim.new(0, 8)
+UICorner.Parent = DebugFrame
+
+local DebugTitle = Instance.new("TextLabel")
+DebugTitle.Name = "Title"
+DebugTitle.Parent = DebugFrame
+DebugTitle.BackgroundTransparency = 1
+DebugTitle.Size = UDim2.new(1, 0, 0, 25)
+DebugTitle.Font = Enum.Font.Arcade
+DebugTitle.Text = "Information Panel"
+DebugTitle.TextColor3 = Color3.fromRGB(220, 220, 220)
+DebugTitle.TextSize = 18
+
+local Divider = Instance.new("Frame")
+Divider.Name = "Divider"
+Divider.Parent = DebugFrame
+Divider.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
+Divider.BorderSizePixel = 0
+Divider.Position = UDim2.new(0.05, 0, 0, 25)
+Divider.Size = UDim2.new(0.9, 0, 0, 1)
+
+local DebugStats = Instance.new("TextLabel")
+DebugStats.Name = "StatsInfo"
+DebugStats.Parent = DebugFrame
+DebugStats.BackgroundTransparency = 1
+DebugStats.Position = UDim2.new(0, 10, 0, 28)
+DebugStats.Size = UDim2.new(1, -20, 0, 15)
+DebugStats.Font = Enum.Font.Fantasy
+DebugStats.Text = "FPS: 60 | Ping: 0ms | Stage: 1/3"
+DebugStats.TextColor3 = Color3.fromRGB(150, 150, 150)
+DebugStats.TextSize = 14
+DebugStats.TextXAlignment = Enum.TextXAlignment.Left
+
+local DebugText = Instance.new("TextLabel")
+DebugText.Name = "Status"
+DebugText.Parent = DebugFrame
+DebugText.BackgroundTransparency = 1
+DebugText.Position = UDim2.new(0, 10, 0, 45)
+DebugText.Size = UDim2.new(1, -20, 1, -75)
+DebugText.Font = Enum.Font.Fantasy
+DebugText.Text = "-"
+DebugText.TextColor3 = Color3.fromRGB(200, 200, 200)
+DebugText.TextSize = 15
+DebugText.TextWrapped = true
+DebugText.TextXAlignment = Enum.TextXAlignment.Left
+DebugText.TextYAlignment = Enum.TextYAlignment.Top
+
+local ActionLabel = Instance.new("TextLabel")
+ActionLabel.Name = "ActionLabel"
+ActionLabel.Parent = DebugFrame
+ActionLabel.BackgroundTransparency = 1
+ActionLabel.Position = UDim2.new(0, 10, 1, -25)
+ActionLabel.Size = UDim2.new(1, -20, 0, 15)
+ActionLabel.Font = Enum.Font.Fantasy
+ActionLabel.Text = "-"
+ActionLabel.TextColor3 = Color3.fromRGB(180, 180, 255)
+ActionLabel.TextSize = 14
+ActionLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local Dragging = false
+local DragInput, DragStart, StartPos
+
+local function OnInputEnded(input)
+    if input.UserInputState == Enum.UserInputState.End then
+        Dragging = false
+    end
+end
+
+local function OnInputBegan(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        Dragging = true
+        DragStart = input.Position
+        StartPos = DebugFrame.Position
+        input.Changed:Connect(OnInputEnded)
+    end
+end
+DebugFrame.InputBegan:Connect(OnInputBegan)
+
+local function OnInputChanged(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        DragInput = input
+    end
+end
+DebugFrame.InputChanged:Connect(OnInputChanged)
+
+local function OnUserInputChanged(input)
+    if input == DragInput and Dragging then
+        local Delta = input.Position - DragStart
+        DebugFrame.Position = UDim2.new(StartPos.X.Scale, StartPos.X.Offset + Delta.X, StartPos.Y.Scale, StartPos.Y.Offset + Delta.Y)
+    end
+end
+UserInputService.InputChanged:Connect(OnUserInputChanged)
+
+local function UpdateDebug(Message)
+    if DebugText.Text ~= Message then
+        DebugText.Text = Message
+    end
+end
+
+local function UpdateActionText(Message)
+    if ActionLabel.Text ~= Message then
+        ActionLabel.Text = Message
+    end
+end
+
+local function GetWorldTypeRaw()
+    local wt = workspace:FindFirstChild("worldType")
+    if wt and wt:IsA("StringValue") then return wt.Value end
+    return "Unknown"
+end
+
+local function FormatWorldName(worldName)
+    if worldName == "Grasslands" then return worldName end
+    if worldName == "AncientSands" then return "Ancient Sands" end
+    if worldName == "HauntedTundra" then return "Haunted Tundra" end
+    if worldName == "CrimsonAbyss" then return "Crimson Abyss" end
+    return worldName
+end
+
+local function RenderSteppedLoop()
+    FrameCount = FrameCount + 1
+    local CurrentTime = os.clock()
+    if CurrentTime - LastFpsTime >= 1 then
+        CurrentFPS = FrameCount
+        FrameCount = 0
+        LastFpsTime = CurrentTime
+    end
+    
+    local Ping = 0
+    pcall(function() Ping = math.floor(LocalPlayer:GetNetworkPing() * 1000) end)
+    DebugStats.Text = string.format("FPS: %d | Ping: %dms | Stage: %s", CurrentFPS, Ping, CurrentStageText)
+end
+RunService.RenderStepped:Connect(RenderSteppedLoop)
+
+local function GetCutsceneState()
+    local CutsceneObj = workspace:FindFirstChild("inCutscene")
+    if CutsceneObj and CutsceneObj:IsA("BoolValue") and CutsceneObj.Value == true then
+        CutsceneWaitUntil = os.clock() + 6
+        return true, "[Cutscene] - Delaying.."
+    end
+    if os.clock() < CutsceneWaitUntil then
+        local Remaining = math.ceil(CutsceneWaitUntil - os.clock())
+        return true, string.format("Cutscene ended. Resuming in %d seconds...", Remaining)
+    end
+    return false, ""
+end
+
+local function GetPrimary(Model)
+    if not Model then return nil end
+    if Model:IsA("BasePart") then return Model end
+    local p = Model.PrimaryPart or Model:FindFirstChild("HumanoidRootPart") or Model:FindFirstChild("Torso") or Model:FindFirstChild("Head") or Model:FindFirstChild("basehitbox")
+    if p then return p end
+    for _, child in ipairs(Model:GetChildren()) do
+        if child:IsA("BasePart") then return child end
+    end
+    return nil
+end
+
+local function IsBoss(ModelName)
+    local NameLower = string.lower(ModelName)
+    for _, bossName in ipairs(BossList) do
+        if string.find(NameLower, bossName) then return true end
+    end
+    return false
+end
+
+local function IsElderSorcererPresent()
+    for _, v in ipairs(workspace:GetChildren()) do
+        if v:IsA("Model") and string.find(string.lower(v.Name), "eldersorcerer") then
+            local HealthObj = v:FindFirstChild("Health")
+            local Hum = v:FindFirstChildOfClass("Humanoid")
+            if (HealthObj and (HealthObj:IsA("NumberValue") or HealthObj:IsA("IntValue")) and HealthObj.Value > 0) or (Hum and Hum.Health > 0) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function IsEnemy(Model)
+    if not Model or not Model.Parent then return false end
+    if Players:GetPlayerFromCharacter(Model) then return false end
+    
+    local NameLower = string.lower(Model.Name)
+    if string.find(NameLower, "rig") then return false end
+    if string.find(NameLower, "teeth") then return false end
+    if string.find(NameLower, "breakable") then return false end
+    if string.find(NameLower, "snowfalling") then return false end
+    if string.find(NameLower, "ashfalling") then return false end
+    if string.find(NameLower, "korthend") then return false end
+    
+    if string.find(NameLower, "bookhand") then return true end
+    if string.find(NameLower, "korth") then return true end
+    if string.find(NameLower, "corruptfleshgiant") then return true end
+    if string.find(NameLower, "splitleft") or string.find(NameLower, "splitright") then return true end
+    
+    local HealthObj = Model:FindFirstChild("Health")
+    if HealthObj and (HealthObj:IsA("NumberValue") or HealthObj:IsA("IntValue")) and HealthObj.Value > 0 then
+        return true
+    end
+    
+    local Hum = Model:FindFirstChildOfClass("Humanoid")
+    if Hum and Hum.Health > 0 then return true end
+    
+    return false
+end
+
+local function IsCrate(Model)
+    if not Model then return false end
+    if string.find(string.lower(Model.Name), "breakable") then return true end
+    return false
+end
+
+local function GetEnemyHealth(Model)
+    local HealthObj = Model:FindFirstChild("Health")
+    if HealthObj and (HealthObj:IsA("NumberValue") or HealthObj:IsA("IntValue")) then
+        return math.floor(HealthObj.Value)
+    end
+    local Hum = Model:FindFirstChildOfClass("Humanoid")
+    if Hum then return math.floor(Hum.Health) end
+    return 0
+end
+
+local function GetEnemyCount()
+    local Count = 0
+    for _, v in ipairs(workspace:GetChildren()) do
+        if IsEnemy(v) then Count = Count + 1 end
+    end
+    local wt = GetWorldTypeRaw()
+    if wt == "CrimsonAbyss" then
+        local TR = workspace:FindFirstChild("ThroneRoom")
+        if TR then
+            for _, v in ipairs(TR:GetChildren()) do
+                if IsEnemy(v) then Count = Count + 1 end
+            end
+        end
+    end
+    return Count
+end
+
+local function GetTargetInfo()
+    local Character = LocalPlayer.Character
+    if not Character or not Character:FindFirstChild("HumanoidRootPart") then return nil, false, nil, {} end
+    
+    local RootPos = Character.HumanoidRootPart.Position
+    local wt = GetWorldTypeRaw()
+    local PotentialTargets = workspace:GetChildren()
+    
+    if wt == "CrimsonAbyss" then
+        local TR = workspace:FindFirstChild("ThroneRoom")
+        local Prisoner = TR and TR:FindFirstChild("Prisoner")
+        
+        if Prisoner and not CurrentBossMode then
+            return nil, false, nil, {}
+        end
+        
+        if TR then
+            for _, v in ipairs(TR:GetChildren()) do
+                table.insert(PotentialTargets, v)
+            end
+        end
+        
+        local BookHandModels = {}
+        local KorthModel = nil
+        
+        for _, v in ipairs(PotentialTargets) do
+            if IsEnemy(v) then
+                local nl = string.lower(v.Name)
+                if string.find(nl, "bookhand") then
+                    table.insert(BookHandModels, v)
+                elseif (string.find(nl, "localkorth") or string.find(nl, "corruptkorth")) and not string.find(nl, "korthend") then
+                    KorthModel = v
+                end
+            end
+        end
+        
+        if #BookHandModels > 0 then
+            local AliveBookHands = {}
+            for _, bh in ipairs(BookHandModels) do
+                if GetEnemyHealth(bh) > 0 then
+                    table.insert(AliveBookHands, bh)
+                end
+            end
+            
+            if #AliveBookHands > 0 then
+                return AliveBookHands[1], true, KorthModel, AliveBookHands
+            elseif KorthModel then
+                return KorthModel, false, nil, {}
+            end
+        elseif KorthModel then
+            return KorthModel, false, nil, {}
+        end
+    end
+
+    local AkumaModel = nil
+    local ElderSorcererPresent = false
+    
+    if wt == "HauntedTundra" then
+        ElderSorcererPresent = IsElderSorcererPresent()
+        for _, v in ipairs(workspace:GetChildren()) do
+            if IsEnemy(v) and string.find(string.lower(v.Name), "akuma") then
+                AkumaModel = v
+                break
+            end
+        end
+        
+        if ElderSorcererPresent then
+            for _, v in ipairs(workspace:GetChildren()) do
+                if IsEnemy(v) and string.find(string.lower(v.Name), "eldersorcerer") then
+                    return v, true, AkumaModel, {}
+                end
+            end
+        elseif AkumaModel then
+            return AkumaModel, false, nil, {}
+        end
+    end
+    
+    local Closest = nil
+    local MinDist = math.huge
+    
+    for _, v in ipairs(PotentialTargets) do
+        if IsEnemy(v) then
+            local Primary = GetPrimary(v)
+            if Primary then
+                local Dist = (RootPos - Primary.Position).Magnitude
+                if Dist < MinDist then
+                    MinDist = Dist
+                    Closest = v
+                end
+            end
+        end
+    end
+    
+    return Closest, false, nil, {}
+end
+
+local function GetNearestSpecific(Keyword)
+    local Character = LocalPlayer.Character
+    if not Character or not Character:FindFirstChild("HumanoidRootPart") then return nil end
+    
+    local RootPos = Character.HumanoidRootPart.Position
+    local BestTarget = nil
+    local MinDist = math.huge
+
+    for _, v in ipairs(workspace:GetDescendants()) do
+        local NameLower = string.lower(v.Name)
+        if string.find(NameLower, Keyword) then
+            local Part = nil
+            if v:IsA("Model") then
+                Part = GetPrimary(v)
+            elseif v:IsA("BasePart") then
+                Part = v
+            end
+            
+            if Part then
+                local Dist = (RootPos - Part.Position).Magnitude
+                if Dist < MinDist and Dist > 15 then
+                    MinDist = Dist
+                    BestTarget = Part
+                end
+            end
+        end
+    end
+    
+    return BestTarget
+end
+
+local function TweenToTarget(TargetPos, Speed)
+    local Character = LocalPlayer.Character
+    if not Character or not Character:FindFirstChild("HumanoidRootPart") then return end
+    local HRP = Character.HumanoidRootPart
+    
+    if CurrentTween then
+        CurrentTween:Cancel()
+        CurrentTween = nil
+    end
+    
+    local Dist = (HRP.Position - TargetPos).Magnitude
+    local Time = Dist / (Speed or 150)
+    
+    local TInfo = TweenInfo.new(Time, Enum.EasingStyle.Linear)
+    CurrentTween = TweenService:Create(HRP, TInfo, {CFrame = CFrame.new(TargetPos)})
+    CurrentTween:Play()
+    
+    return Time
+end
+
+local function TweenToStartDoorAndWait()
+    local ThroneRoom = workspace:FindFirstChild("ThroneRoom")
+    if not ThroneRoom then return false end
+    
+    local StartDoor = ThroneRoom:FindFirstChild("StartDoor")
+    if not StartDoor then return false end
+    
+    local DoorPart = GetPrimary(StartDoor)
+    if not DoorPart then return false end
+    
+    UpdateActionText("Moving to Start")
+    UpdateDebug("Moving to Start")
+    
+    local Time = TweenToTarget(DoorPart.Position + Vector3.new(0, 3, 0), 100)
+    task.wait(Time + 1)
+    
+    StartDoorTweenComplete = true
+    return true
+end
+
+local function TweenToPrisonerAndWait()
+    local ThroneRoom = workspace:FindFirstChild("ThroneRoom")
+    if not ThroneRoom then return false end
+    
+    local Prisoner = ThroneRoom:FindFirstChild("Prisoner")
+    if not Prisoner then return false end
+    
+    local PrisonerPart = GetPrimary(Prisoner)
+    if not PrisonerPart then return false end
+    
+    UpdateActionText("Moving to Prisoner")
+    UpdateDebug("Moving to Trigger")
+    
+    local Time = TweenToTarget(PrisonerPart.Position + Vector3.new(0, 3, 0), 100)
+    task.wait(Time + 1)
+    
+    PrisonerTweenComplete = true
+    return true
+end
+
+local function UpdateAuraSphere()
+    if not getgenv().KillAuraEnabled then
+        if AuraSphere then
+            AuraSphere:Destroy()
+            AuraSphere = nil
+        end
+        return
+    end
+    
+    local Character = LocalPlayer.Character
+    if not Character or not Character:FindFirstChild("HumanoidRootPart") then return end
+    
+    if not AuraSphere then
+        AuraSphere = Instance.new("Part")
+        AuraSphere.Name = "AuraVisual"
+        AuraSphere.Anchored = true
+        AuraSphere.CanCollide = false
+        AuraSphere.Transparency = 0.7
+        AuraSphere.BrickColor = BrickColor.new("Lime green")
+        AuraSphere.Material = Enum.Material.ForceField
+        AuraSphere.Shape = Enum.PartType.Ball
+        AuraSphere.Size = Vector3.new(1, 1, 1) * getgenv().KillAuraMagnitude * 2
+        AuraSphere.Parent = workspace
+    end
+    
+    AuraSphere.Size = Vector3.new(1, 1, 1) * getgenv().KillAuraMagnitude * 2
+    AuraSphere.CFrame = Character.HumanoidRootPart.CFrame
+    
+    local Target = GetTargetInfo()
+    local CurrentColor = Color3.new(0, 1, 0)
+    
+    local IsCutscene, _ = GetCutsceneState()
+    if IsCutscene or getgenv().IsTriggeringBoss or KorthWaiting then
+        CurrentColor = Color3.new(1, 0.5, 0)
+    elseif Target then
+        local Primary = GetPrimary(Target)
+        if Primary then
+            local Dist = (Character.HumanoidRootPart.Position - Primary.Position).Magnitude
+            if Dist <= getgenv().KillAuraMagnitude then
+                CurrentColor = Color3.new(1, 0, 0)
+            end
+        end
+    end
+    
+    AuraSphere.Color = CurrentColor
+end
+
+local function KillAuraAction()
+    while true do
+        task.wait(0.05)
+        if getgenv().KillAuraEnabled and not KorthWaiting and not getgenv().IsTriggeringBoss then
+            pcall(function()
+                local IsCutscene = GetCutsceneState()
+                if IsCutscene then return end
+                
+                local Character = LocalPlayer.Character
+                if not (Character and Character:FindFirstChild("HumanoidRootPart")) then return end
+                local RootPos = Character.HumanoidRootPart.Position
+                
+                local Remote = ReplicatedStorage:FindFirstChild("remotes")
+                if not (Remote and Remote:FindFirstChild("onHit")) then return end
+                
+                local wt = GetWorldTypeRaw()
+                local IsTundra = (wt == "HauntedTundra")
+                local IsCrimson = (wt == "CrimsonAbyss")
+                local ElderSorcererPresent = IsTundra and IsElderSorcererPresent()
+                local AkumaInAura = false
+                local KorthInAura = false
+
+                if IsTundra then
+                    for _, v in ipairs(workspace:GetChildren()) do
+                        if string.find(string.lower(v.Name), "akuma") then
+                            local Primary = GetPrimary(v)
+                            if Primary and (RootPos - Primary.Position).Magnitude <= tonumber(getgenv().KillAuraMagnitude) then
+                                AkumaInAura = true
+                                break
+                            end
+                        end
+                    end
+                elseif IsCrimson then
+                    local TR = workspace:FindFirstChild("ThroneRoom")
+                    if TR then
+                        for _, v in ipairs(TR:GetChildren()) do
+                            local nl = string.lower(v.Name)
+                            if (string.find(nl, "localkorth") or string.find(nl, "corruptkorth")) and not string.find(nl, "korthend") then
+                                local Primary = GetPrimary(v)
+                                if Primary and (RootPos - Primary.Position).Magnitude <= tonumber(getgenv().KillAuraMagnitude) then
+                                    KorthInAura = true
+                                end
+                            end
+                        end
+                    end
+                end
+
+                local TargetsToHit = {}
+                local MainTarget, HasSpecial, SpecialRef, BookHands = GetTargetInfo()
+
+                local function IsValidTarget(model)
+                    if string.find(string.lower(model.Name), "prisoner") then return false end
+                    if IsEnemy(model) or IsCrate(model) then
+                        return true
+                    end
+                    local nameLower = string.lower(model.Name)
+                    if string.find(nameLower, "split") then
+                        local health = GetEnemyHealth(model)
+                        return health > 0
+                    end
+                    return false
+                end
+
+                if IsCrimson and HasSpecial and BookHands then
+                    for _, bh in ipairs(BookHands) do
+                        if GetEnemyHealth(bh) > 0 then
+                            table.insert(TargetsToHit, bh)
+                        end
+                    end
+                elseif getgenv().AuraStyle == "Slow" then
+                    if MainTarget and IsValidTarget(MainTarget) then
+                        table.insert(TargetsToHit, MainTarget)
+                    end
+                else
+                    local PotentialTargets = workspace:GetChildren()
+                    if IsCrimson then
+                        local TR = workspace:FindFirstChild("ThroneRoom")
+                        if TR then
+                            for _, v in ipairs(TR:GetChildren()) do
+                                table.insert(PotentialTargets, v)
+                            end
+                        end
+                    end
+                    for _, v in ipairs(PotentialTargets) do
+                        if IsValidTarget(v) then
+                            table.insert(TargetsToHit, v)
+                        end
+                    end
+                end
+
+                for _, v in ipairs(TargetsToHit) do
+                    local Primary = GetPrimary(v)
+                    local NameLower = string.lower(v.Name)
+                    local Dist = Primary and (RootPos - Primary.Position).Magnitude or math.huge
+                    local IsBookHand = string.find(NameLower, "bookhand")
+
+                    local CanHit = false
+                    if Dist <= tonumber(getgenv().KillAuraMagnitude) then
+                        CanHit = true
+                    elseif IsBookHand and CurrentBossMode then
+                        CanHit = true
+                    end
+
+                    if CanHit then
+                        if ElderSorcererPresent and string.find(NameLower, "akuma") then
+                            AuraEntryTimes[v] = nil
+                        else
+                            if not AuraEntryTimes[v] then
+                                AuraEntryTimes[v] = os.clock()
+                            end
+                            
+                            local RequiredDelay = 0
+                            
+                            if AkumaInAura or KorthInAura then
+                                RequiredDelay = 2
+                            else
+                                RequiredDelay = 0.1
+                            end
+                            
+                            if IsBookHand then
+                                RequiredDelay = 0.1
+                            end
+                            
+                            if os.clock() - AuraEntryTimes[v] >= RequiredDelay then
+                                local TargetObj = v:FindFirstChildOfClass("Humanoid") or v:FindFirstChild("Health") or v
+                                local EnemyHP = GetEnemyHealth(v)
+                                local FireTimes = EnemyHP > 100 and 2 or 1
+                                
+                                local DamageValue = 999
+                                if string.find(NameLower, "split") then
+                                    DamageValue = 393.3
+                                elseif string.find(NameLower, "bookhand") then
+                                    DamageValue = 427.125
+                                end
+                                
+                                for i = 1, FireTimes do
+                                    pcall(function()
+                                        Remote.onHit:FireServer(TargetObj, DamageValue, {}, 0)
+                                    end)
+                                end
+                                
+                                if IsBookHand then
+                                    AuraEntryTimes[v] = os.clock()
+                                end
+                            end
+                        end
+                    else
+                        AuraEntryTimes[v] = nil
+                    end
+                end
+            end)
+        end
+    end
+end
+
+local function StartKillAura()
+    if KillAuraThread then
+        task.cancel(KillAuraThread)
+        KillAuraThread = nil
+    end
+    KillAuraThread = task.spawn(KillAuraAction)
+end
+
+local function SetKillAuraState(State)
+    getgenv().KillAuraEnabled = State
+    if State then
+        StartKillAura()
+    end
+end
+
+local function SetKillAuraMagnitude(Value)
+    local num = tonumber(Value) or 15
+    getgenv().KillAuraMagnitude = num
+    getgenv().UserAuraMagnitude = num
+end
+
+local function OrbitLogic(DeltaTime)
+    if not getgenv().AutoDungeon then return end
+    if CurrentFPS < 10 then return end
+    if getgenv().IsTriggeringBoss then return end
+    
+    local IsCutscene = GetCutsceneState()
+    if IsCutscene then return end
+    
+    local Target, HasSpecial, SpecialRef = GetTargetInfo()
+    local Character = LocalPlayer.Character
+    local OrbitTarget = Target
+    
+    if HasSpecial and SpecialRef and Target and string.find(string.lower(Target.Name), "bookhand") then
+        local TR = workspace:FindFirstChild("ThroneRoom")
+        local Korth = nil
+        for _, v in ipairs(TR:GetChildren()) do
+            local nl = string.lower(v.Name)
+            if (string.find(nl, "localkorth") or string.find(nl, "corruptkorth")) and not string.find(nl, "korthend") then
+                Korth = v
+                break
+            end
+        end
+        if Korth then
+            OrbitTarget = Korth
+        end
+    end
+    
+    if OrbitTarget and Character and Character:FindFirstChild("HumanoidRootPart") and not KorthWaiting then
+        local Primary = GetPrimary(OrbitTarget)
+        if Primary then
+            local HRP = Character.HumanoidRootPart
+            local Dist = (HRP.Position - Primary.Position).Magnitude
+            
+            if CurrentBossMode then
+                CurrentSafeDistance = BOSS_SAFE_DISTANCE
+            else
+                CurrentSafeDistance = NORMAL_SAFE_DISTANCE
+            end
+            
+            if Dist > 50 then
+                TweenToTarget(Primary.Position + Vector3.new(0, CurrentSafeDistance, 0), 100)
+            else
+                if CurrentTween then
+                    CurrentTween:Cancel()
+                    CurrentTween = nil
+                end
+                
+                local SpeedToUse = 1.5
+                OrbitAngle = (OrbitAngle + SpeedToUse * DeltaTime) % (2 * math.pi)
+                local Offset = Vector3.new(math.cos(OrbitAngle) * ORBIT_RADIUS, CurrentSafeDistance, math.sin(OrbitAngle) * ORBIT_RADIUS)
+                
+                HRP.CFrame = CFrame.new(Primary.Position + Offset, Primary.Position)
+            end
+        end
+    end
+end
+
+local function UpdateStageText(Target)
+    if not Target then return end
+    local name = string.lower(Target.Name)
+    local wt = GetWorldTypeRaw()
+    
+    if wt == "Grasslands" then
+        if string.find(name, "lumberjack") then CurrentStageText = "1/3" end
+        if string.find(name, "giantgoblin") then CurrentStageText = "2/3" end
+        if string.find(name, "kingslayer") then CurrentStageText = "3/3" end
+    elseif wt == "AncientSands" then
+        if string.find(name, "maneater") then CurrentStageText = "1/3" end
+        if string.find(name, "nekros") then CurrentStageText = "2/3" end
+        if string.find(name, "atticus") then CurrentStageText = "3/3" end
+    elseif wt == "HauntedTundra" then
+        if string.find(name, "shimbombo") then CurrentStageText = "1/3" end
+        if string.find(name, "akuma") then CurrentStageText = "2/3" end
+        if string.find(name, "kori") then CurrentStageText = "3/3" end
+    elseif wt == "CrimsonAbyss" then
+        if string.find(name, "gatekeeper") then CurrentStageText = "1/3" end
+        if string.find(name, "infestedbeast") then CurrentStageText = "2/3" end
+        if string.find(name, "localkorth") or string.find(name, "corruptkorth") or string.find(name, "bookhand") then CurrentStageText = "3/3" end
+    end
+end
+
+local function AutoDungeonManager()
+    while true do
+        task.wait(0.2)
+        if not getgenv().AutoDungeon then
+            UpdateDebug("-")
+            UpdateActionText("-")
+            KorthWaiting = false
+            CurrentBossMode = false
+            TriggeredKorthSpawn = false
+            TweenToPrisoner = false
+            PrisonerTweenComplete = false
+            StartDoorTweenComplete = false
+            getgenv().IsTriggeringBoss = false
+            getgenv().KillAuraMagnitude = getgenv().UserAuraMagnitude
+            continue
+        end
+
+        pcall(function()
+            if CurrentFPS < 10 then
+                UpdateDebug("[Critical FPS] Pausing Auto Dungeon")
+                if CurrentTween then CurrentTween:Cancel() CurrentTween = nil end
+                task.wait(1)
+                return
+            end
+            
+            local IsCutscene, CutsceneMsg = GetCutsceneState()
+            if IsCutscene then
+                UpdateDebug("[Warning!] " .. CutsceneMsg)
+                UpdateActionText("Idle")
+                return
+            end
+            
+            local Target, HasSpecial, SpecialRef, BookHands = GetTargetInfo()
+            local Character = LocalPlayer.Character
+            local CurrentWorldStr = "\nPlaying In: " .. FormatWorldName(GetWorldTypeRaw())
+            local wt = GetWorldTypeRaw()
+            
+            if wt == "CrimsonAbyss" then
+                local ThroneRoom = workspace:FindFirstChild("ThroneRoom")
+                
+                if ThroneRoom and not StartDoorTweenComplete and not TweenToPrisoner and not PrisonerTweenComplete and not TriggeredKorthSpawn and not CurrentBossMode then
+                    getgenv().IsTriggeringBoss = true
+                    UpdateDebug("Moving to Start" .. CurrentWorldStr)
+                    UpdateActionText("Moving to StartDoor")
+                    
+                    local success = TweenToStartDoorAndWait()
+                    
+                    if success then
+                        StartDoorTweenComplete = true
+                    end
+                    return
+                end
+                
+                if ThroneRoom and StartDoorTweenComplete and not TweenToPrisoner and not PrisonerTweenComplete and not TriggeredKorthSpawn and not CurrentBossMode then
+                    getgenv().IsTriggeringBoss = true
+                    UpdateDebug("Moving To Trigger" .. CurrentWorldStr)
+                    UpdateActionText("Moving to Trigger")
+                    
+                    local success = TweenToPrisonerAndWait()
+                    
+                    if success then
+                        TweenToPrisoner = true
+                        PrisonerTweenComplete = true
+                    end
+                    return
+                end
+                
+                if PrisonerTweenComplete and not TriggeredKorthSpawn and not CurrentBossMode then
+                    getgenv().IsTriggeringBoss = true
+                    UpdateDebug("Waiting for Korth spawn.." .. CurrentWorldStr)
+                    UpdateActionText("Waiting Boss Stuff")
+                    
+                    TriggeredKorthSpawn = true
+                    KorthTriggerTime = os.clock()
+                    return
+                end
+                
+                if TriggeredKorthSpawn and not CurrentBossMode then
+                    if os.clock() - KorthTriggerTime >= 5 then
+                        KorthWaiting = true
+                        CurrentBossMode = true
+                        getgenv().KillAuraMagnitude = 50
+                        TriggeredKorthSpawn = false
+                        UpdateDebug("Killing : [Boss] Korth" .. CurrentWorldStr)
+                        UpdateActionText("Delaying [Korth]")
+                        KorthArrivalTime = os.clock()
+                    else
+                        UpdateActionText("Waiting For Korth")
+                        return
+                    end
+                end
+                
+                if KorthWaiting and os.clock() - KorthArrivalTime >= 4 then
+                    KorthWaiting = false
+                    getgenv().IsTriggeringBoss = false
+                end
+                
+                if KorthWaiting then return end
+                
+                if not KorthWaiting and SpecialRef and (string.find(string.lower(SpecialRef.Name), "localkorth") or string.find(string.lower(SpecialRef.Name), "corruptkorth")) and not string.find(string.lower(SpecialRef.Name), "korthend") then
+                    if BookHands and #BookHands > 0 then
+                        local AliveCount = 0
+                        for _, bh in ipairs(BookHands) do
+                            if GetEnemyHealth(bh) > 0 then
+                                AliveCount = AliveCount + 1
+                            end
+                        end
+                        
+                        if AliveCount > 0 then
+                            UpdateDebug("Killing : Book Hand (" .. AliveCount .. " remaining)" .. CurrentWorldStr)
+                            UpdateActionText("Attacking Defender")
+                        else
+                            UpdateDebug("Killing : [Boss] Korth" .. CurrentWorldStr)
+                            UpdateActionText("Attacking Korth")
+                        end
+                    else
+                        UpdateDebug("Killing : [Boss] Korth" .. CurrentWorldStr)
+                        UpdateActionText("Attacking Korth")
+                    end
+                    CurrentBossMode = true
+                    getgenv().KillAuraMagnitude = 50
+                    return
+                end
+            else
+                getgenv().IsTriggeringBoss = false
+                CurrentBossMode = false
+                KorthWaiting = false
+                TriggeredKorthSpawn = false
+                TweenToPrisoner = false
+                PrisonerTweenComplete = false
+                StartDoorTweenComplete = false
+                getgenv().KillAuraMagnitude = getgenv().UserAuraMagnitude
+            end
+            
+            if Target and Character and Character:FindFirstChild("HumanoidRootPart") then
+                LastEnemyTime = os.clock()
+                TeleportedToExit = false
+                UpdateStageText(Target)
+                
+                local FormattedName = FormatEnemyName(Target.Name)
+                
+                if IsBoss(Target.Name) then
+                    BossDetectedThisWave = true
+                    UpdateDebug("Killing : [Boss] " .. FormattedName .. CurrentWorldStr)
+                else
+                    UpdateDebug("Killing : " .. FormattedName .. CurrentWorldStr)
+                end
+                
+                local TargetNameLower = string.lower(Target.Name)
+                if string.find(TargetNameLower, "split") then
+                    UpdateActionText("Engaging Problem")
+                elseif string.find(TargetNameLower, "bookhand") then
+                    UpdateActionText("Attacking Defender")
+                else
+                    UpdateActionText("Engaging")
+                end
+                
+            else
+                UpdateActionText("Idle")
+                local EnemyCount = GetEnemyCount()
+                if EnemyCount <= 0 then
+                    if Character and Character:FindFirstChild("HumanoidRootPart") then
+                        if CurrentStageText == "3/3" then
+                            UpdateDebug("Dungeon Completed (3/3). Stopping." .. CurrentWorldStr)
+                            if CurrentTween then CurrentTween:Cancel() CurrentTween = nil end
+                        else
+                            local TimeElapsed = os.clock() - LastEnemyTime
+                            if not TeleportedToExit and TimeElapsed > 2 then
+                                local ExitPart = GetNearestSpecific("exit")
+                                if ExitPart then
+                                    UpdateDebug("Finding Exit" .. CurrentWorldStr)
+                                    TweenToTarget(ExitPart.Position + Vector3.new(0, 5, 0), 150)
+                                    task.wait(3)
+                                end
+                                
+                                if BossDetectedThisWave then
+                                    local CampfirePart = GetNearestSpecific("campfire")
+                                    if CampfirePart then
+                                        UpdateDebug("Finding Nearest Campfire" .. CurrentWorldStr)
+                                        TweenToTarget(CampfirePart.Position + Vector3.new(0, 5, 0), 150)
+                                        task.wait(3)
+                                    end
+                                    BossDetectedThisWave = false
+                                end
+                                
+                                TeleportedToExit = true
+                                UpdateDebug("Waiting Next Area" .. CurrentWorldStr)
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+    end
+end
+
+local function AutoPromptLoop()
+    while true do
+        task.wait(5)
+        if getgenv().AutoDungeon then
+            pcall(function()
+                local Character = LocalPlayer.Character
+                if Character and Character:FindFirstChild("HumanoidRootPart") then
+                    local RootPos = Character.HumanoidRootPart.Position
+                    for _, v in ipairs(workspace:GetDescendants()) do
+                        if v:IsA("ProximityPrompt") then
+                            local ParentPart = v.Parent
+                            if ParentPart and ParentPart:IsA("BasePart") then
+                                local Dist = (RootPos - ParentPart.Position).Magnitude
+                                if Dist <= 50 then
+                                    fireproximityprompt(v)
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+    end
+end
+
+local function MovementModifier()
+    while true do
+        task.wait(0.1)
+        pcall(function()
+            local Character = LocalPlayer.Character
+            local Hum = Character and Character:FindFirstChild("Humanoid")
+            if Hum then
+                if getgenv().WalkSpeedEnabled then Hum.WalkSpeed = getgenv().WalkSpeedValue end
+                if getgenv().JumpPowerEnabled then Hum.JumpPower = getgenv().JumpPowerValue Hum.UseJumpPower = true end
+            end
+        end)
+    end
+end
+
+local function NoclipAndAntiFallHandler()
+    local Character = LocalPlayer.Character
+    if not Character then return end
+    
+    local HRP = Character:FindFirstChild("HumanoidRootPart")
+    
+    if getgenv().AutoDungeon then
+        for _, Part in pairs(Character:GetDescendants()) do
+            if Part:IsA("BasePart") and Part.CanCollide then
+                Part.CanCollide = false
+            end
+        end
+        
+        if HRP then
+            local AntiFall = HRP:FindFirstChild("SawitAntiFall")
+            if not AntiFall then
+                AntiFall = Instance.new("BodyVelocity")
+                AntiFall.Name = "SawitAntiFall"
+                AntiFall.MaxForce = Vector3.new(0, math.huge, 0)
+                AntiFall.Velocity = Vector3.zero
+                AntiFall.Parent = HRP
+            end
+        end
+    else
+        if HRP then
+            local AntiFall = HRP:FindFirstChild("SawitAntiFall")
+            if AntiFall then AntiFall:Destroy() end
+        end
+    end
+end
+
+local function CleanupESP(Model)
+    if ESPObjects[Model] then
+        if ESPObjects[Model].Highlight then ESPObjects[Model].Highlight:Destroy() end
+        if ESPObjects[Model].Billboard then ESPObjects[Model].Billboard:Destroy() end
+        ESPObjects[Model] = nil
+    end
+end
+
+local function UpdateESPVisuals()
+    for Model, ESP in pairs(ESPObjects) do
+        if not Model or not Model.Parent or not (IsEnemy(Model) or string.find(string.lower(Model.Name), "split")) then
+            CleanupESP(Model)
+        end
+    end
+
+    local PotentialTargets = workspace:GetChildren()
+    local wt = GetWorldTypeRaw()
+    if wt == "CrimsonAbyss" then
+        local TR = workspace:FindFirstChild("ThroneRoom")
+        if TR then
+            for _, v in ipairs(TR:GetChildren()) do
+                table.insert(PotentialTargets, v)
+            end
+        end
+    end
+
+    for _, v in ipairs(PotentialTargets) do
+        if IsEnemy(v) or string.find(string.lower(v.Name), "split") then
+            local Primary = GetPrimary(v)
+            if Primary then
+                if not ESPObjects[v] then
+                    local GuiTarget = gethui and gethui() or CoreGui
+                    local HL = Instance.new("Highlight")
+                    HL.Name = "SawitESP"
+                    HL.FillColor = Color3.fromRGB(255, 0, 0)
+                    HL.OutlineColor = Color3.fromRGB(255, 255, 255)
+                    HL.FillTransparency = 0.5
+                    HL.OutlineTransparency = 0
+                    HL.Enabled = false
+                    HL.Parent = GuiTarget
+
+                    local BB = Instance.new("BillboardGui")
+                    BB.Name = "SawitInfo"
+                    BB.Size = UDim2.new(0, 100, 0, 40)
+                    BB.StudsOffset = Vector3.new(0, 3, 0)
+                    BB.AlwaysOnTop = true
+                    BB.Enabled = false
+                    BB.Parent = GuiTarget
+
+                    local NameText = Instance.new("TextLabel")
+                    NameText.Size = UDim2.new(1, 0, 0.5, 0)
+                    NameText.BackgroundTransparency = 1
+                    NameText.TextColor3 = Color3.fromRGB(255, 230, 240)
+                    NameText.TextStrokeTransparency = 0
+                    NameText.Font = Enum.Font.GothamBold
+                    NameText.TextSize = 12
+                    NameText.Text = string.upper(FormatEnemyName(v.Name))
+                    NameText.Parent = BB
+
+                    local HealthText = Instance.new("TextLabel")
+                    HealthText.Size = UDim2.new(1, 0, 0.5, 0)
+                    HealthText.Position = UDim2.new(0, 0, 0.5, 0)
+                    HealthText.BackgroundTransparency = 1
+                    HealthText.TextColor3 = Color3.fromRGB(200, 255, 200)
+                    HealthText.TextStrokeTransparency = 0
+                    HealthText.Font = Enum.Font.GothamBold
+                    HealthText.TextSize = 11
+                    HealthText.Text = string.format("%d HP", GetEnemyHealth(v))
+                    HealthText.Parent = BB
+
+                    ESPObjects[v] = { Highlight = HL, Billboard = BB, NameLabel = NameText, HealthLabel = HealthText, Target = v }
+                end
+
+                local ESP = ESPObjects[v]
+                if getgenv().EspEnabled then
+                    ESP.Highlight.Adornee = v
+                    ESP.Billboard.Adornee = Primary
+                    
+                    ESP.Highlight.Enabled = getgenv().EspBox
+                    ESP.Billboard.Enabled = getgenv().EspName or getgenv().EspHealth
+
+                    ESP.NameLabel.Visible = getgenv().EspName
+                    ESP.HealthLabel.Visible = getgenv().EspHealth
+                    ESP.HealthLabel.Text = string.format("%d HP", GetEnemyHealth(v))
+                else
+                    ESP.Highlight.Enabled = false
+                    ESP.Billboard.Enabled = false
+                end
+            end
+        end
+    end
+end
+
+RunService.Heartbeat:Connect(UpdateAuraSphere)
+RunService.Heartbeat:Connect(OrbitLogic)
+RunService.Stepped:Connect(NoclipAndAntiFallHandler)
+RunService.RenderStepped:Connect(UpdateESPVisuals)
+
+task.spawn(AutoDungeonManager)
+task.spawn(AutoPromptLoop)
+task.spawn(MovementModifier)
+task.spawn(AutoChestLoop)
+
+local function SetAuraStyle(Value) 
+    getgenv().AuraStyle = Value 
+    if getgenv().KillAuraEnabled then
+        SetKillAuraState(true)
+    end
+end
+local function SetAutoDungeonState(State) getgenv().AutoDungeon = State end
+local function SetKillAuraMagnitude(Value) 
+    local num = tonumber(Value) or 15
+    getgenv().KillAuraMagnitude = num
+    getgenv().UserAuraMagnitude = num
+end
+local function SetDebugPanelState(State) 
+    getgenv().DebugPanelEnabled = State
+    DebugGui.Enabled = State
+end
+local function SetWalkSpeedState(State) getgenv().WalkSpeedEnabled = State end
+local function SetWalkSpeedValue(Value) getgenv().WalkSpeedValue = tonumber(Value) or 16 end
+local function SetJumpPowerState(State) getgenv().JumpPowerEnabled = State end
+local function SetJumpPowerValue(Value) getgenv().JumpPowerValue = tonumber(Value) or 50 end
+local function SetEspState(State) getgenv().EspEnabled = State end
+local function SetEspBoxState(State) getgenv().EspBox = State end
+local function SetEspNameState(State) getgenv().EspName = State end
+local function SetEspHealthState(State) getgenv().EspHealth = State end
+local function SetAutoChestState(State) getgenv().AutoChestEnabled = State end
+local function SetSelectedChest(Value)
+    for _, Chest in ipairs(getgenv().ChestList) do
+        if Chest.Display == Value then
+            getgenv().SelectedChest = Chest.Name
+            return
+        end
+    end
+    getgenv().SelectedChest = ""
+end
+
+local function HandleDropAdded(Child)
+    task.wait()
+    pcall(function() Child:Destroy() end)
+end
+
+local function OptimizeFPS()
+    pcall(function() Lighting.GlobalShadows = false end)
+    pcall(function() Lighting.FogEnd = 9e9 end)
+    pcall(function() Lighting.ShadowSoftness = 0 end)
+    
+    if sethiddenproperty then
+        pcall(function() sethiddenproperty(Lighting, "Technology", Enum.Technology.Compatibility) end)
+    end
+    
+    for _, v in ipairs(workspace:GetDescendants()) do
+        local NameLower = string.lower(v.Name)
+        local isCharacterPart = false
+        if LocalPlayer.Character and v:IsDescendantOf(LocalPlayer.Character) then isCharacterPart = true end
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr.Character and v:IsDescendantOf(plr.Character) then isCharacterPart = true break end
+        end
+
+        if not isCharacterPart then
+            if v:IsA("BasePart") or v:IsA("UnionOperation") or v:IsA("MeshPart") then
+                pcall(function()
+                    v.Material = Enum.Material.SmoothPlastic
+                    v.Reflectance = 0
+                end)
+                if v:IsA("MeshPart") then pcall(function() v.TextureID = "" end) end
+            elseif v:IsA("Decal") or v:IsA("Texture") then
+                pcall(function() v:Destroy() end)
+            elseif v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Beam") or v:IsA("Fire") or v:IsA("Smoke") or v:IsA("Sparkles") then
+                local pName = v.Parent and string.lower(v.Parent.Name) or ""
+                if string.find(pName, "ashfalling") or string.find(pName, "snowfalling") then
+                    pcall(function() v.Enabled = false end)
+                else
+                    pcall(function() v:Destroy() end)
+                end
+            end
+        end
+    end
+    
+    local dropsFolder = workspace:FindFirstChild("playerDrops")
+    if dropsFolder then
+        for _, v in ipairs(dropsFolder:GetChildren()) do pcall(function() v:Destroy() end) end
+        if not getgenv().AntiLagConnection then
+            getgenv().AntiLagConnection = dropsFolder.ChildAdded:Connect(HandleDropAdded)
+        end
+    end
+    
+    pcall(function() LocalPlayer.SimulationRadius = 20 end)
+    WindUI:Notify({Title = "Optimized..", Content = "Lowered some laggy stuff..", Duration = 4})
+end
+
+local function RemoveCooldownAndEnergy()
+    for i, v in pairs(getgc(true)) do
+        if type(v) == "table" then
+            if rawget(v, "cooldown") then rawset(v, "cooldown", 0) end
+            if rawget(v, "DashCD") then rawset(v, "DashCD", 0) end
+            if rawget(v, "energyPerSecond") then rawset(v, "energyPerSecond", math.huge) end
+        end
+    end
+    WindUI:Notify({Title = "Success!", Content = "Running in background..", Duration = 4})
+end
+
+local function CopyDiscordLink()
+    setclipboard("https://discord.gg/7PhnNwdnaX")
+    WindUI:Notify({Title = "Mwah", Content = "Good Boy.", Duration = 3})
+end
+
+local function CopyWhatsAppLink()
+    setclipboard("https://chat.whatsapp.com/L0kQgqtQPGk8nxlu4PLj5G?mode=gi_t")
+    WindUI:Notify({Title = "Mwah", Content = "Good Boy.", Duration = 3})
+end
+
+local function GetPlayerNames()
+    local list = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then table.insert(list, p.Name) end
+    end
+    if #list == 0 then table.insert(list, "No Players") end
+    return list
+end
+
+local function SetSelectedTeleportPlayer(Value)
+    getgenv().SelectedTeleportPlayer = Value
+end
+
+local function TeleportToSelectedPlayer()
+    local pName = getgenv().SelectedTeleportPlayer
+    local targetPlr = Players:FindFirstChild(pName)
+    if targetPlr and targetPlr.Character and targetPlr.Character:FindFirstChild("HumanoidRootPart") then
+        local myChar = LocalPlayer.Character
+        if myChar and myChar:FindFirstChild("HumanoidRootPart") then
+            myChar.HumanoidRootPart.CFrame = targetPlr.Character.HumanoidRootPart.CFrame
+            WindUI:Notify({Title = "Teleported", Content = "Teleported to " .. pName, Duration = 3})
+        end
+    else
+        WindUI:Notify({Title = "Failed", Content = "Player not found..", Duration = 3})
+    end
+end
+
+local function BuildInterface()
+    local Window = WindUI:CreateWindow({
+        Title = "Sawit Hub",
+        Icon = "leaf",
+        Author = "[Free]",
+        Folder = "Sawit Hub",
+        Theme = "Crimson",
+        Background = "https://files.catbox.moe/pp3ptu.jpg",
+        User = { Enabled = true, Anonymous = false, Callback = function() end },
+        KeySystem = { 
+            Key = { "SawitLiar" },
+            Note = "The key is on Script-Info Channel.",
+            URL = "https://discord.gg/7PhnNwdnaX",
+            SaveKey = true,
+        },
+    })
+
+    local MainTab = Window:Tab({ Title = "Main", Icon = "house" })
+
+    MainTab:Section({ Title = "Combat" })
+    MainTab:Dropdown({ Title = "KA Options", Values = {"Fast", "Slow"}, Value = "Fast", Callback = SetAuraStyle })
+    MainTab:Input({ Title = "Aura Hitbox", Placeholder = "15", Callback = SetKillAuraMagnitude })
+    MainTab:Toggle({ Title = "[Risky] Auto Dungeon", Value = false, Callback = SetAutoDungeonState })
+    MainTab:Toggle({ Title = "Kill Aura", Value = false, Callback = SetKillAuraState })
+    MainTab:Toggle({ Title = "Information Panel", Value = false, Callback = SetDebugPanelState })
+
+    MainTab:Section({ Title = "Movement" })
+    MainTab:Input({ Title = "Jump Value", Placeholder = "50", Callback = SetJumpPowerValue })
+    MainTab:Input({ Title = "Speed Value", Placeholder = "16", Callback = SetWalkSpeedValue })
+    MainTab:Toggle({ Title = "Custom Jump Power", Value = false, Callback = SetJumpPowerState })
+    MainTab:Toggle({ Title = "Custom Walkspeed", Value = false, Callback = SetWalkSpeedState })
+
+    MainTab:Section({ Title = "Auto Chest" })
+    local ChestDropdown = MainTab:Dropdown({ 
+        Title = "Select Chest", 
+        Values = {"Loading..."}, 
+        Value = "Loading...", 
+        Callback = SetSelectedChest 
+    })
+    
+    local AutoChestToggle = MainTab:Toggle({ 
+        Title = "Auto Open Chest", 
+        Value = false, 
+        Callback = SetAutoChestState 
+    })
+    
+    if game.PlaceId ~= 18172550962 then
+        pcall(function()
+            AutoChestToggle:Lock("Lobby Only")
+        end)
+    end
+    
+    MainTab:Button({ 
+        Title = "Refresh", 
+        Callback = function()
+            RefreshChestDropdown(ChestDropdown)
+            WindUI:Notify({Title = "Info", Content = "Refreshing", Duration = 2})
+        end 
+    })
+
+    local EspTab = Window:Tab({ Title = "ESP", Icon = "eye" })
+    EspTab:Toggle({ Title = "ESP", Value = false, Callback = SetEspState })
+    EspTab:Toggle({ Title = "Show Highlights", Value = true, Callback = SetEspBoxState })
+    EspTab:Toggle({ Title = "Show Names", Value = true, Callback = SetEspNameState })
+    EspTab:Toggle({ Title = "Show Health", Value = true, Callback = SetEspHealthState })
+
+    local MiscTab = Window:Tab({ Title = "Misc", Icon = "settings" })
+    MiscTab:Section({ Title = "Player Teleport" })
+    local PlayerDropdown = MiscTab:Dropdown({ Title = "Select Player", Values = GetPlayerNames(), Value = "No Players", Callback = SetSelectedTeleportPlayer })
+    MiscTab:Button({ Title = "Refresh", Callback = function() 
+        local pNames = GetPlayerNames()
+        if PlayerDropdown.Refresh then
+            PlayerDropdown:Refresh(pNames)
+        elseif PlayerDropdown.SetValues then
+            PlayerDropdown:SetValues(pNames)
+        end
+        WindUI:Notify({Title = "Info", Content = "Refreshed...", Duration = 2}) 
+    end })
+    MiscTab:Button({ Title = "Teleport", Callback = TeleportToSelectedPlayer })
+
+    MiscTab:Section({ Title = "Optimization & Exploits" })
+    MiscTab:Button({ Title = "Optimize Now! [Irreversible]", Desc = "Improve your gameplay a little bit better.", Callback = OptimizeFPS })
+    MiscTab:Button({ Title = "Inf Dash & Stamina [Irreversible]", Desc = "This function is glitchy, don't expect much.", Callback = RemoveCooldownAndEnergy })
+
+    local InfoTab = Window:Tab({ Title = "Information", Icon = "info" })
+    InfoTab:Paragraph({ Title = "Sawit Project Information", Desc = "Discord : <font color='#7289da'>Sawit Project</font>\nMade By : <font color='#ed2939'>Sawit Team</font> & <font color='#00aaff'>Artificial Intelligence</font>", ImageSize = 50, Thumbnail = "https://files.catbox.moe/qk446a.jpg", ThumbnailSize = 180 })
+    InfoTab:Paragraph({ Title = "Join Our Community!", Desc = "Have question or request? Join up.", Buttons = { { Title = "Discord Server", Icon = "message-circle", Variant = "Primary", Callback = CopyDiscordLink }, { Title = "WhatsApp Group", Icon = "phone", Variant = "Secondary", Callback = CopyWhatsAppLink } } })
+
+    MainTab:Select()
+    RefreshChestDropdown(ChestDropdown)
+end
+
+WindUI:Popup({
+    Title = "Greetings!",
+    Icon = "leaf",
+    Content = "Reserved Well | <font color='#ed2939'><b>Sawit Hub</b></font>.",
+    Buttons = { { Title = "Continue", Icon = "arrow-right", Variant = "Primary", Callback = BuildInterface } }
+ })
